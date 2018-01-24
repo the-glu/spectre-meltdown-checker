@@ -629,6 +629,34 @@ is_coreos()
 	return 1
 }
 
+is_skylake_cpu()
+{
+	# is this a skylake cpu?
+	# return 0 if yes, 1 otherwise
+	#if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
+	#	    boot_cpu_data.x86 == 6) {
+	#		switch (boot_cpu_data.x86_model) {
+	#		case INTEL_FAM6_SKYLAKE_MOBILE:
+	#		case INTEL_FAM6_SKYLAKE_DESKTOP:
+	#		case INTEL_FAM6_SKYLAKE_X:
+	#		case INTEL_FAM6_KABYLAKE_MOBILE:
+	#		case INTEL_FAM6_KABYLAKE_DESKTOP:
+	#			return true;
+	grep -q GenuineIntel /proc/cpuinfo || return 1
+	grep -qE '^cpu family.+ 6$' /proc/cpuinfo || return 1
+	cpu_model=$(grep '^model' /proc/cpuinfo | awk '{print $3}' | grep -E '^[0-9]+$' | head -1)
+	#define INTEL_FAM6_SKYLAKE_MOBILE	0x4E
+	#define INTEL_FAM6_SKYLAKE_DESKTOP	0x5E
+	#define INTEL_FAM6_SKYLAKE_X		0x55
+	#define INTEL_FAM6_KABYLAKE_MOBILE	0x8E
+	#define INTEL_FAM6_KABYLAKE_DESKTOP	0x9E
+	_debug "is_skylake_cpu: is Intel with model=$cpu_model"
+	echo "$cpu_model" | grep -qE '^(78|94|85|142|158)$' && return 0
+	_debug "is_skylake_cpu: ... not skylake"
+	return 1
+}
+is_skylake_cpu
+
 # check for mode selection inconsistency
 if [ "$opt_live_explicit" = 1 ]; then
 	if [ -n "$opt_kernel" -o -n "$opt_config" -o -n "$opt_map" ]; then
