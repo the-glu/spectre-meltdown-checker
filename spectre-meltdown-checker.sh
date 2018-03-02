@@ -4,11 +4,12 @@
 # Check for the latest version at:
 # https://github.com/speed47/spectre-meltdown-checker
 # git clone https://github.com/speed47/spectre-meltdown-checker.git
-# or wget https://raw.githubusercontent.com/speed47/spectre-meltdown-checker/master/spectre-meltdown-checker.sh
+# or wget meltdown.ovh -O spectre-meltdown-checker.sh
+# or curl -L meltdown.ovh -o spectre-meltdown-checker.sh
 #
 # Stephane Lesimple
 #
-VERSION='0.34+'
+VERSION='0.35'
 
 trap 'exit_cleanup' EXIT
 trap '_warn "interrupted, cleaning up..."; exit_cleanup; exit 1' INT
@@ -52,6 +53,7 @@ show_usage()
 		--batch text			Produce machine readable output, this is the default if --batch is specified alone
 		--batch json			Produce JSON output formatted for Puppet, Ansible, Chef...
 		--batch nrpe			Produce machine readable output formatted for NRPE
+		--batch prometheus              Produce output for consumption by prometheus-node-exporter
 		--variant [1,2,3]		Specify which variant you'd like to check, by default all variants are checked
 						Can be specified multiple times (e.g. --variant 2 --variant 3)
 
@@ -343,7 +345,7 @@ is_cpu_specex_free()
 
 show_header()
 {
-	_info "\033[1;34mSpectre and Meltdown mitigation detection tool v$VERSION\033[0m"
+	_info "Spectre and Meltdown mitigation detection tool v$VERSION"
 	_info
 }
 
@@ -414,7 +416,7 @@ while [ -n "$1" ]; do
 		opt_verbose=0
 		shift
 		case "$1" in
-			text|nrpe|json) opt_batch_format="$1"; shift;;
+			text|nrpe|json|prometheus) opt_batch_format="$1"; shift;;
 			--*) ;;    # allow subsequent flags
 			'') ;;     # allow nothing at all
 			*)
@@ -492,14 +494,15 @@ pstatus()
 pvulnstatus()
 {
 	if [ "$opt_batch" = 1 ]; then
+		case "$1" in
+			CVE-2017-5753) aka="SPECTRE VARIANT 1";;
+			CVE-2017-5715) aka="SPECTRE VARIANT 2";;
+			CVE-2017-5754) aka="MELTDOWN";;
+		esac
+
 		case "$opt_batch_format" in
 			text) _echo 0 "$1: $2 ($3)";;
 			json)
-				case "$1" in
-					CVE-2017-5753) aka="SPECTRE VARIANT 1";;
-					CVE-2017-5715) aka="SPECTRE VARIANT 2";;
-					CVE-2017-5754) aka="MELTDOWN";;
-				esac
 				case "$2" in
 					UNK)  is_vuln="null";;
 					VULN) is_vuln="true";;
@@ -509,6 +512,9 @@ pvulnstatus()
 				;;
 
 			nrpe)	[ "$2" = VULN ] && nrpe_vuln="$nrpe_vuln $1";;
+			prometheus)
+				prometheus_output="${prometheus_output:+$prometheus_output\n}specex_vuln_status{name=\"$aka\",cve=\"$1\",status=\"$2\",info=\"$3\"} 1"
+				;;
 		esac
 	fi
 
@@ -780,22 +786,24 @@ is_ucode_blacklisted()
 	[ "$cpu_family" = 6 ] || return 1
 	# now, check each known bad microcode
 	# source: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/kernel/cpu/intel.c#n105
+	# 2018-02-08 update: https://newsroom.intel.com/wp-content/uploads/sites/11/2018/02/microcode-update-guidance.pdf
 	# model,stepping,microcode
 	ucode_found="model $cpu_model stepping $cpu_stepping ucode $cpu_ucode"
 	for tuple in \
-		$INTEL_FAM6_KABYLAKE_DESKTOP,0x0B,0x84 \
-		$INTEL_FAM6_KABYLAKE_DESKTOP,0x0A,0x84 \
-		$INTEL_FAM6_KABYLAKE_DESKTOP,0x09,0x84 \
-		$INTEL_FAM6_KABYLAKE_MOBILE,0x0A,0x84  \
-		$INTEL_FAM6_KABYLAKE_MOBILE,0x09,0x84  \
+		$INTEL_FAM6_KABYLAKE_DESKTOP,0x0B,0x80 \
+		$INTEL_FAM6_KABYLAKE_DESKTOP,0x0A,0x80 \
+		$INTEL_FAM6_KABYLAKE_DESKTOP,0x09,0x80 \
+		$INTEL_FAM6_KABYLAKE_MOBILE,0x0A,0x80  \
+		$INTEL_FAM6_KABYLAKE_MOBILE,0x09,0x80  \
 		$INTEL_FAM6_SKYLAKE_X,0x03,0x0100013e  \
+		$INTEL_FAM6_SKYLAKE_X,0x04,0x02000036  \
+		$INTEL_FAM6_SKYLAKE_X,0x04,0x0200003a  \
 		$INTEL_FAM6_SKYLAKE_X,0x04,0x0200003c  \
-		$INTEL_FAM6_SKYLAKE_MOBILE,0x03,0xc2   \
-		$INTEL_FAM6_SKYLAKE_DESKTOP,0x03,0xc2  \
 		$INTEL_FAM6_BROADWELL_CORE,0x04,0x28   \
 		$INTEL_FAM6_BROADWELL_GT3E,0x01,0x1b   \
 		$INTEL_FAM6_BROADWELL_XEON_D,0x02,0x14 \
 		$INTEL_FAM6_BROADWELL_XEON_D,0x03,0x07000011 \
+		$INTEL_FAM6_BROADWELL_X,0x01,0x0b000023 \
 		$INTEL_FAM6_BROADWELL_X,0x01,0x0b000025 \
 		$INTEL_FAM6_HASWELL_ULT,0x01,0x21      \
 		$INTEL_FAM6_HASWELL_GT3E,0x01,0x18     \
@@ -803,7 +811,6 @@ is_ucode_blacklisted()
 		$INTEL_FAM6_HASWELL_X,0x02,0x3b        \
 		$INTEL_FAM6_HASWELL_X,0x04,0x10        \
 		$INTEL_FAM6_IVYBRIDGE_X,0x04,0x42a     \
-		$INTEL_FAM6_ATOM_GEMINI_LAKE,0x01,0x22 \
 		$INTEL_FAM6_SANDYBRIDGE_X,0x06,0x61b   \
 		$INTEL_FAM6_SANDYBRIDGE_X,0x07,0x712
 	do
@@ -918,6 +925,8 @@ if [ "$opt_live" = 1 ]; then
 		[ -e "/boot/kernel-genkernel-$(uname -m)-$(uname -r)" ] && opt_kernel="/boot/kernel-genkernel-$(uname -m)-$(uname -r)"
 		# NixOS:
 		[ -e "/run/booted-system/kernel" ] && opt_kernel="/run/booted-system/kernel"
+		# systemd kernel-install:
+		[ -e "/etc/machine-id" ] && [ -e "/boot/$(cat /etc/machine-id)/$(uname -r)/linux" ] && opt_kernel="/boot/$(cat /etc/machine-id)/$(uname -r)/linux"
 	fi
 
 	# system.map
@@ -1220,7 +1229,7 @@ check_cpu()
 		_warn "the mitigations for Spectre), or upgrade to a newer one if available."
 		_warn
 	else
-		pstatus green NO "$ucode_found"
+		pstatus blue NO "$ucode_found"
 	fi
 
 	_info     "* CPU vulnerability to the three speculative execution attacks variants"
@@ -1235,6 +1244,28 @@ check_cpu()
 
 	_info
 }
+
+check_redhat_canonical_spectre()
+{
+	# if we were already called, don't do it again
+	[ -n "$redhat_canonical_spectre" ] && return
+
+	if ! which strings >/dev/null 2>&1; then
+		redhat_canonical_spectre=-1
+	else
+		# Red Hat / Ubuntu specific variant1 patch is difficult to detect,
+		# let's use the same way than the official Red Hat detection script,
+		# and detect their specific variant2 patch. If it's present, it means
+		# that the variant1 patch is also present (both were merged at the same time)
+		if strings "$vmlinux" | grep -qw noibrs && strings "$vmlinux" | grep -qw noibpb; then
+			_debug "found redhat/canonical version of the variant2 patch (implies variant1)"
+			redhat_canonical_spectre=1
+		else
+			redhat_canonical_spectre=0
+		fi
+	fi
+}
+
 
 ###################
 # SPECTRE VARIANT 1
@@ -1286,7 +1317,17 @@ check_variant1()
 			fi
 		fi
 
-		if [ "$opt_verbose" -ge 2 ] || [ "$v1_mask_nospec" != 1 ]; then
+		_info_nol "* Kernel has the Red Hat/Ubuntu patch: "
+		check_redhat_canonical_spectre
+		if [ "$redhat_canonical_spectre" = -1 ]; then
+			pstatus yellow UNKNOWN "missing 'strings' tool, please install it, usually it's in the binutils package"
+		elif [ "$redhat_canonical_spectre" = 1 ]; then
+			pstatus green YES
+		else
+			pstatus red NO
+		fi
+
+		if [ "$opt_verbose" -ge 2 ] || ( [ "$v1_mask_nospec" != 1 ] && [ "$redhat_canonical_spectre" != 1 ] ); then
 			# this is a slow heuristic and we don't need it if we already know the kernel is patched
 			# but still show it in verbose mode
 			_info_nol "* Checking count of LFENCE instructions following a jump in kernel... "
@@ -1329,6 +1370,8 @@ check_variant1()
 		# if msg is empty, sysfs check didn't fill it, rely on our own test
 		if [ "$v1_mask_nospec" = 1 ]; then
 			pvulnstatus $cve OK "Kernel source has been patched to mitigate the vulnerability (array_index_mask_nospec)"
+		elif [ "$redhat_canonical_spectre" = 1 ]; then
+			pvulnstatus $cve OK "Kernel source has been patched to mitigate the vulnerability (Red Hat/Ubuntu patch)"
 		elif [ "$v1_lfence" = 1 ]; then
 			pvulnstatus $cve OK "Kernel source has PROBABLY been patched to mitigate the vulnerability (jump-then-lfence instructions heuristic)"
 		elif [ "$vmlinux_err" ]; then
@@ -1374,7 +1417,7 @@ check_variant2()
 				if [ -e "$dir/ibrs_enabled" ]; then
 					# if the file is there, we have IBRS compiled-in
 					# /sys/kernel/debug/ibrs_enabled: vanilla
-					# /sys/kernel/debug/x86/ibrs_enabled: RedHat (see https://access.redhat.com/articles/3311301)
+					# /sys/kernel/debug/x86/ibrs_enabled: Red Hat (see https://access.redhat.com/articles/3311301)
 					# /proc/sys/kernel/ibrs_enabled: OpenSUSE tumbleweed
 					pstatus green YES
 					ibrs_knob_dir=$dir
@@ -1413,6 +1456,13 @@ check_variant2()
 				pstatus green YES
 				ibrs_supported=1
 				_debug "ibrs: found '*spec_ctrl*' symbol in $opt_map"
+			fi
+		fi
+		if [ "$ibrs_supported" != 1 ]; then
+			check_redhat_canonical_spectre
+			if [ "$redhat_canonical_spectre" = 1 ]; then
+				pstatus green YES "Red Hat/Ubuntu patch"
+				ibrs_supported=1
 			fi
 		fi
 		if [ "$ibrs_supported" != 1 ]; then
@@ -1582,19 +1632,6 @@ check_variant2()
 				pstatus red NO
 			fi
 		fi
-
-		_info_nol "  * Retpoline enabled: "
-		if [ "$opt_live" = 1 ]; then
-			# kernel adds this flag when retpoline is supported and enabled,
-			# regardless of the fact that it's minimal / full and generic / amd
-			if grep -qw retpoline /proc/cpuinfo; then
-				pstatus green YES
-			else
-				pstatus red NO
-			fi
-		else
-			pstatus blue N/A "can't check this in offline mode"
-		fi
 	elif [ "$sys_interface_available" = 0 ]; then
 		# we have no sysfs but were asked to use it only!
 		msg="/sys vulnerability interface use forced, but it's not available!"
@@ -1617,6 +1654,8 @@ check_variant2()
 				pvulnstatus $cve OK "IBRS is mitigating the vulnerability"
 			elif [ "$ibpb_enabled" = 2 ]; then
 				pvulnstatus $cve OK "Full IBPB is mitigating the vulnerability"
+			elif [ "$ibrs_supported" = 1 ] && [ "$cpuid_spec_ctrl" != 1 ]; then
+				pvulnstatus $cve VULN "Your kernel is compiled with IBRS but your CPU microcode is lacking support to successfully mitigate the vulnerability"
 			else
 				pvulnstatus $cve VULN "IBRS hardware + kernel support OR kernel with retpoline are needed to mitigate the vulnerability"
 			fi
@@ -1706,7 +1745,7 @@ check_variant3()
 				_debug "kpti_enabled: found 'kaiser' flag in /proc/cpuinfo"
 				kpti_enabled=1
 			elif [ -e /sys/kernel/debug/x86/pti_enabled ]; then
-				# RedHat Backport creates a dedicated file, see https://access.redhat.com/articles/3311301
+				# Red Hat Backport creates a dedicated file, see https://access.redhat.com/articles/3311301
 				kpti_enabled=$(cat /sys/kernel/debug/x86/pti_enabled 2>/dev/null)
 				_debug "kpti_enabled: file /sys/kernel/debug/x86/pti_enabled exists and says: $kpti_enabled"
 			fi
@@ -1801,7 +1840,7 @@ check_variant3()
 			elif [ "$xen_pv_domo" = 1 ]; then
 				pvulnstatus $cve OK "Xen Dom0s are safe and do not require PTI"
 			elif [ "$xen_pv_domu" = 1 ]; then
-				pvulnstatus $cve VULN "Xen PV DomUs are vulnerable and need to be run in HVM, PVHVM or PVH mode"
+				pvulnstatus $cve VULN "Xen PV DomUs are vulnerable and need to be run in HVM, PVHVM, PVH mode, or the Xen hypervisor must have the Xen's own PTI patch"
 			else
 				pvulnstatus $cve VULN "PTI is needed to mitigate the vulnerability"
 			fi
@@ -1864,6 +1903,12 @@ fi
 
 if [ "$opt_batch" = 1 ] && [ "$opt_batch_format" = "json" ]; then
 	_echo 0 "${json_output%?}]"
+fi
+
+if [ "$opt_batch" = 1 ] && [ "$opt_batch_format" = "prometheus" ]; then
+	echo "# TYPE specex_vuln_status untyped"
+	echo "# HELP specex_vuln_status Exposure of system to speculative execution vulnerabilities"
+	echo "$prometheus_output"
 fi
 
 # exit with the proper exit code
