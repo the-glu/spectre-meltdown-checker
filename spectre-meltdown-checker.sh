@@ -4,8 +4,8 @@
 # Check for the latest version at:
 # https://github.com/speed47/spectre-meltdown-checker
 # git clone https://github.com/speed47/spectre-meltdown-checker.git
-# or wget meltdown.ovh -O spectre-meltdown-checker.sh
-# or curl -L meltdown.ovh -o spectre-meltdown-checker.sh
+# or wget https://meltdown.ovh -O spectre-meltdown-checker.sh
+# or curl -L https://meltdown.ovh -o spectre-meltdown-checker.sh
 #
 # Stephane Lesimple
 #
@@ -339,7 +339,7 @@ is_cpu_specex_free()
 			return 0
 		fi
 	fi
-	[ "$cpu_family" -eq 4 ] && return 0
+	[ "$cpu_family" = 4 ] && return 0
 	return 1
 }
 
@@ -607,6 +607,7 @@ extract_vmlinux()
 	try_decompress '\135\0\0\0'       xxx   unlzma  ''      xz-utils    "$1" && return 0
 	try_decompress '\211\114\132'     xy    'lzop'  '-d'    lzop        "$1" && return 0
 	try_decompress '\002\041\114\030' xyy   'lz4'   '-d -l' liblz4-tool "$1" && return 0
+	try_decompress '\177ELF'          xxy   'cat'   ''      cat         "$1" && return 0
 	return 1
 }
 
@@ -711,6 +712,7 @@ parse_cpu_details()
 	cpu_model=$(   grep '^model'      /proc/cpuinfo | awk '{print $3}' | grep -E '^[0-9]+$' | head -1)
 	cpu_stepping=$(grep '^stepping'   /proc/cpuinfo | awk '{print $3}' | grep -E '^[0-9]+$' | head -1)
 	cpu_ucode=$(  grep '^microcode'   /proc/cpuinfo | awk '{print $3}' | head -1)
+	echo "$cpu_ucode" | grep -q ^0x && cpu_ucode_decimal=$(( cpu_ucode ))
 
 	# also define those that we will need in other funcs
 	# taken from ttps://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/intel-family.h
@@ -817,9 +819,12 @@ is_ucode_blacklisted()
 		model=$(echo $tuple | cut -d, -f1)
 		stepping=$(( $(echo $tuple | cut -d, -f2) ))
 		ucode=$(echo $tuple | cut -d, -f3)
-		if [ "$cpu_model" = "$model" ] && [ "$cpu_stepping" = "$stepping" ] && echo "$cpu_ucode" | grep -qi "^$ucode$"; then
-			_debug "is_ucode_blacklisted: we have a match! ($cpu_model/$cpu_stepping/$cpu_ucode)"
-			return 0
+		echo "$ucode" | grep -q ^0x && ucode_decimal=$(( ucode ))
+		if [ "$cpu_model" = "$model" ] && [ "$cpu_stepping" = "$stepping" ]; then
+			if [ "$cpu_ucode_decimal" = "$ucode_decimal" ] || [ "$cpu_ucode" = "$ucode" ]; then
+				_debug "is_ucode_blacklisted: we have a match! ($cpu_model/$cpu_stepping/$cpu_ucode)"
+				return 0
+			fi
 		fi
 	done
 	_debug "is_ucode_blacklisted: no ($cpu_model/$cpu_stepping/$cpu_ucode)"
@@ -917,6 +922,8 @@ if [ "$opt_live" = 1 ]; then
 		[ -e "/boot/vmlinuz-linux"       ] && opt_kernel="/boot/vmlinuz-linux"
 		# Linux-Libre:
 		[ -e "/boot/vmlinuz-linux-libre" ] && opt_kernel="/boot/vmlinuz-linux-libre"
+		# pine64
+		[ -e "/boot/pine64/Image"        ] && opt_kernel="/boot/pine64/Image"
 		# generic:
 		[ -e "/boot/vmlinuz-$(uname -r)" ] && opt_kernel="/boot/vmlinuz-$(uname -r)"
 		[ -e "/boot/kernel-$( uname -r)" ] && opt_kernel="/boot/kernel-$( uname -r)"
@@ -1004,6 +1011,10 @@ if [ -z "$vmlinux" ] || [ ! -r "$vmlinux" ]; then
 	[ -z "$vmlinux_err" ] && vmlinux_err="couldn't extract your kernel from $opt_kernel"
 else
 	vmlinux_version=$(strings "$vmlinux" 2>/dev/null | grep '^Linux version ' | head -1)
+	if [ -z "$vmlinux_version" ]; then
+		# try harder with some kernels (such as Red Hat) that don't have ^Linux version before their version string
+		vmlinux_version=$(strings "$vmlinux" 2>/dev/null | grep -E '^[[:alnum:]][^[:space:]]+ \([^[:space:]]+\) #[0-9]+ .+ (19|20)[0-9][0-9]$' | head -1)
+	fi
 	if [ -n "$vmlinux_version" ]; then
 		# in live mode, check if the img we found is the correct one
 		if [ "$opt_live" = 1 ]; then
@@ -1015,6 +1026,8 @@ else
 		else
 			_info "Kernel image is \033[35m$vmlinux_version"
 		fi
+	else
+		_verbose "Kernel image version is unknown"
 	fi
 fi
 
@@ -1050,6 +1063,38 @@ sys_interface_check()
 	return 0
 }
 
+number_of_cpus()
+{
+	n=$(grep -c ^processor /proc/cpuinfo)
+	return "$n"
+}
+
+# $1 - msr number
+# $2 - cpu index 
+check_msr_enable()
+{
+	dd if=/dev/cpu/"$2"/msr of=/dev/null bs=8 count=1 skip="$1" iflag=skip_bytes 2>/dev/null; ret=$?
+	return $ret
+}
+
+# $1 - msr number
+# $2 - cpu index 
+# $3 - value
+write_to_msr()
+{
+	$echo_cmd -ne "$3" | dd of=/dev/cpu/"$2"/msr bs=8 count=1 seek="$1" oflag=seek_bytes 2>/dev/null; ret=$?
+	return $ret
+}
+
+# $1 - msr number
+# $2 - cpu index 
+read_msr()
+{
+	msr=$(dd if=/dev/cpu/"$2"/msr bs=8 count=1 skip="$1" iflag=skip_bytes 2>/dev/null | od -t u1 -A n | awk '{print $8}');
+	return "$msr"
+}
+
+
 check_cpu()
 {
 	_info "\033[1;34mHardware check\033[0m"
@@ -1057,6 +1102,9 @@ check_cpu()
 	_info     "* Hardware support (CPU microcode) for mitigation techniques"
 	_info     "  * Indirect Branch Restricted Speculation (IBRS)"
 	_info_nol "    * SPEC_CTRL MSR is available: "
+	number_of_cpus
+	ncpus=$?
+	idx_max_cpu=$((ncpus-1))
 	if [ ! -e /dev/cpu/0/msr ]; then
 		# try to load the module ourselves (and remember it so we can rmmod it afterwards)
 		load_msr
@@ -1069,10 +1117,30 @@ check_cpu()
 		# here we use dd, it's the same as using 'rdmsr 0x48' but without needing the rdmsr tool
 		# if we get a read error, the MSR is not there. bs has to be 8 for msr
 		# skip=9 because 8*9=72=0x48
-		dd if=/dev/cpu/0/msr of=/dev/null bs=8 count=1 skip=9 2>/dev/null; ret=$?
-		if [ $ret -eq 0 ]; then
-			spec_ctrl_msr=1
-			pstatus green YES
+		val=0
+		cpu_mismatch=0
+		for i in $(seq 0 "$idx_max_cpu")
+		do 
+			check_msr_enable 72 "$i"
+			ret=$?
+			if [ "$i" -eq 0 ]; then
+				val=$ret
+			else
+				if [ "$ret" -eq $val ]; then
+					continue
+				else
+					cpu_mismatch=1
+				fi
+			fi
+		done
+		if [ $val -eq 0 ]; then
+			if [ $cpu_mismatch -eq 0 ]; then
+				spec_ctrl_msr=1
+				pstatus green YES
+			else
+				spec_ctrl_msr=1
+				pstatus green YES "But not in all CPUs"
+			fi
 		else
 			spec_ctrl_msr=0
 			pstatus red NO
@@ -1117,14 +1185,33 @@ check_cpu()
 		# the new MSR 'PRED_CTRL' is at offset 0x49, write-only
 		# here we use dd, it's the same as using 'wrmsr 0x49 0' but without needing the wrmsr tool
 		# if we get a write error, the MSR is not there
-		$echo_cmd -ne "\0\0\0\0\0\0\0\0" | dd of=/dev/cpu/0/msr bs=8 count=1 seek=73 oflag=seek_bytes 2>/dev/null; ret=$?
-		if [ $ret -eq 0 ]; then
-			pstatus green YES
+		val=0
+		cpu_mismatch=0
+		for i in $(seq 0 "$idx_max_cpu")
+		do 
+			write_to_msr 73 "$i" "\0\0\0\0\0\0\0\0"
+			ret=$?
+			if [ "$i" -eq 0 ]; then
+				val=$ret
+			else
+				if [ "$ret" -eq $val ]; then
+					continue
+				else
+					cpu_mismatch=1
+				fi
+			fi
+		done
+
+		if [ $val -eq 0 ]; then
+			if [ $cpu_mismatch -eq 0 ]; then
+				pstatus green YES
+			else
+				pstatus green YES "But not in all CPUs"
+			fi
 		else
 			pstatus red NO
 		fi
 	fi
-
 
 	_info_nol "    * CPU indicates IBPB capability: "
 	# CPUID EAX=0x80000008, ECX=0x00 return EBX[12] indicates support for just IBPB.
@@ -1192,16 +1279,40 @@ check_cpu()
 		# the new MSR 'ARCH_CAPABILITIES' is at offset 0x10a
 		# here we use dd, it's the same as using 'rdmsr 0x10a' but without needing the rdmsr tool
 		# if we get a read error, the MSR is not there. bs has to be 8 for msr
-		capabilities=$(dd if=/dev/cpu/0/msr bs=8 count=1 skip=266 iflag=skip_bytes 2>/dev/null | od -t u1 -A n | awk '{print $8}'); ret=$?
+		val=0
+		val_cap_msr=0
+		cpu_mismatch=0
+		for i in $(seq 0 "$idx_max_cpu")
+		do 
+			check_msr_enable 266 "$i"
+			ret=$?
+			read_msr 266 "$i"
+			capabilities=$?
+			if [ "$i" -eq 0 ]; then
+				val=$ret
+				val_cap_msr=$capabilities
+			else
+				if [ "$ret" -eq "$val" -a "$capabilities" -eq "$val_cap_msr" ]; then
+					continue
+				else
+					cpu_mismatch=1
+				fi
+			fi
+		done
+		capabilities=$val_cap_msr
 		capabilities_rdcl_no=0
 		capabilities_ibrs_all=0
-		if [ $ret -eq 0 ]; then
+		if [ $val -eq 0 ]; then
 			_debug "capabilities MSR lower byte is $capabilities (decimal)"
 			[ $(( capabilities & 1 )) -eq 1 ] && capabilities_rdcl_no=1
 			[ $(( capabilities & 2 )) -eq 2 ] && capabilities_ibrs_all=1
 			_debug "capabilities says rdcl_no=$capabilities_rdcl_no ibrs_all=$capabilities_ibrs_all"
 			if [ "$capabilities_ibrs_all" = 1 ]; then
-				pstatus green YES
+				if [ $cpu_mismatch -eq 0 ]; then
+					pstatus green YES
+				else:
+					pstatus green YES "But not in all CPUs"
+				fi
 			else
 				pstatus red NO
 			fi
@@ -1252,6 +1363,8 @@ check_redhat_canonical_spectre()
 
 	if ! which strings >/dev/null 2>&1; then
 		redhat_canonical_spectre=-1
+	elif [ -n "$vmlinux_err" ]; then
+		redhat_canonical_spectre=-2
 	else
 		# Red Hat / Ubuntu specific variant1 patch is difficult to detect,
 		# let's use the same way than the official Red Hat detection script,
@@ -1321,6 +1434,8 @@ check_variant1()
 		check_redhat_canonical_spectre
 		if [ "$redhat_canonical_spectre" = -1 ]; then
 			pstatus yellow UNKNOWN "missing 'strings' tool, please install it, usually it's in the binutils package"
+		elif [ "$redhat_canonical_spectre" = -2 ]; then
+			pstatus yellow UNKNOWN "couldn't check ($vmlinux_err)"
 		elif [ "$redhat_canonical_spectre" = 1 ]; then
 			pstatus green YES
 		else
@@ -1813,6 +1928,11 @@ check_variant3()
 				xen_pv_domo=1
 			else
 				xen_pv_domu=1
+			fi
+			# PVHVM guests also print 'Booting paravirtualized kernel', so we need this check.
+			dmesg_grep 'Xen HVM callback vector for event delivery is enabled$'; ret=$?
+			if [ $ret -eq 0 ]; then
+				xen_pv_domu=0
 			fi
 		fi
 	fi
